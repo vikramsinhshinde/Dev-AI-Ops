@@ -1,0 +1,282 @@
+from fastapi import FastAPI, HTTPException, BackgroundTasks
+from fastapi.middleware.cors import CORSMiddleware
+from pydantic import BaseModel
+from typing import List, Optional, Dict, Any
+import asyncio
+import logging
+from datetime import datetime, timedelta
+import random
+import json
+
+from .models import Alert, CostOptimization, Deployment, MLModel, Incident
+from .ml_models import AnomalyDetector, CostPredictor
+from .monitoring import MonitoringService
+from .cost_optimizer import CostOptimizer
+
+app = FastAPI(title="DevOps AIOps Dashboard", version="1.0.0")
+
+# CORS middleware
+app.add_middleware(
+    CORSMiddleware,
+    allow_origins=["*"],
+    allow_credentials=True,
+    allow_methods=["*"],
+    allow_headers=["*"],
+)
+
+# Initialize services
+monitoring = MonitoringService()
+anomaly_detector = AnomalyDetector()
+cost_predictor = CostPredictor()
+cost_optimizer = CostOptimizer()
+
+# Mock database
+alerts_db = []
+cost_optimizations_db = []
+deployments_db = []
+ml_models_db = []
+incidents_db = []
+
+class HealthCheck(BaseModel):
+    status: str
+    timestamp: str
+
+class MetricData(BaseModel):
+    cpu_usage: float
+    memory_usage: float
+    network_in: float
+    network_out: float
+    request_count: int
+    error_rate: float
+    pod_name: str
+    namespace: str
+
+class DeploymentRequest(BaseModel):
+    image: str
+    version: str
+    replicas: int
+    namespace: str
+
+@app.get("/")
+async def root():
+    return {"message": "DevOps AIOps Dashboard API"}
+
+@app.get("/health")
+async def health_check():
+    return HealthCheck(
+        status="healthy",
+        timestamp=datetime.now().isoformat()
+    )
+
+@app.get("/metrics/current")
+async def get_current_metrics():
+    """Get current system metrics"""
+    metrics = monitoring.get_current_metrics()
+    # Add anomaly detection
+    for metric in metrics:
+        metric["is_anomaly"] = anomaly_detector.detect_anomaly(metric)
+        if metric["is_anomaly"]:
+            # Create alert for anomaly
+            alert = Alert(
+                id=len(alerts_db) + 1,
+                severity="warning",
+                message=f"Anomaly detected in {metric['pod_name']}",
+                type="anomaly",
+                timestamp=datetime.now(),
+                resolved=False
+            )
+            alerts_db.append(alert)
+    return metrics
+
+@app.get("/metrics/historical")
+async def get_historical_metrics(hours: int = 24):
+    """Get historical metrics"""
+    return monitoring.get_historical_metrics(hours)
+
+@app.post("/metrics")
+async def submit_metrics(metric: MetricData):
+    """Submit custom metrics"""
+    anomaly_score = anomaly_detector.predict(
+        cpu=metric.cpu_usage,
+        memory=metric.memory_usage,
+        error_rate=metric.error_rate
+    )
+    
+    if anomaly_score > 0.8:
+        # Create high severity alert
+        alert = Alert(
+            id=len(alerts_db) + 1,
+            severity="critical",
+            message=f"Critical anomaly detected in {metric.pod_name}: CPU={metric.cpu_usage}%, Memory={metric.memory_usage}%",
+            type="performance",
+            timestamp=datetime.now(),
+            resolved=False,
+            pod_name=metric.pod_name,
+            namespace=metric.namespace
+        )
+        alerts_db.append(alert)
+    
+    return {
+        "status": "success",
+        "anomaly_score": anomaly_score,
+        "anomaly_detected": anomaly_score > 0.7
+    }
+
+@app.get("/alerts")
+async def get_alerts(resolved: bool = False, limit: int = 50):
+    """Get alerts"""
+    filtered = [a for a in alerts_db if a.resolved == resolved]
+    return filtered[:limit]
+
+@app.post("/alerts/{alert_id}/resolve")
+async def resolve_alert(alert_id: int):
+    """Resolve an alert"""
+    for alert in alerts_db:
+        if alert.id == alert_id:
+            alert.resolved = True
+            alert.resolved_at = datetime.now()
+            return {"status": "resolved"}
+    raise HTTPException(status_code=404, detail="Alert not found")
+
+@app.get("/cost/optimization")
+async def get_cost_optimizations():
+    """Get cost optimization recommendations"""
+    recommendations = cost_optimizer.get_recommendations()
+    cost_optimizations_db.extend(recommendations)
+    return recommendations
+
+@app.get("/cost/forecast")
+async def get_cost_forecast(days: int = 30):
+    """Get cost forecast"""
+    forecast = cost_predictor.forecast(days)
+    return forecast
+
+@app.post("/deploy")
+async def deploy_application(deploy: DeploymentRequest):
+    """Deploy a new application version"""
+    deployment = Deployment(
+        id=len(deployments_db) + 1,
+        image=deploy.image,
+        version=deploy.version,
+        replicas=deploy.replicas,
+        namespace=deploy.namespace,
+        status="deploying",
+        timestamp=datetime.now()
+    )
+    deployments_db.append(deployment)
+    
+    # Simulate deployment process
+    asyncio.create_task(simulate_deployment(deployment.id))
+    
+    return {"status": "deployment_started", "deployment_id": deployment.id}
+
+async def simulate_deployment(deployment_id: int):
+    """Simulate deployment process"""
+    await asyncio.sleep(5)
+    for deployment in deployments_db:
+        if deployment.id == deployment_id:
+            deployment.status = "success"
+            break
+
+@app.get("/deployments")
+async def get_deployments():
+    """Get deployment history"""
+    return deployments_db[-20:]  # Last 20 deployments
+
+@app.get("/ml/models")
+async def get_ml_models():
+    """Get ML models in production"""
+    return ml_models_db
+
+@app.post("/ml/deploy")
+async def deploy_ml_model(model_name: str, version: str):
+    """Deploy an ML model"""
+    model = MLModel(
+        id=len(ml_models_db) + 1,
+        name=model_name,
+        version=version,
+        status="deploying",
+        timestamp=datetime.now()
+    )
+    ml_models_db.append(model)
+    
+    # Simulate deployment
+    await asyncio.sleep(3)
+    model.status = "active"
+    
+    return {"status": "model_deployed", "model_id": model.id}
+
+@app.get("/incidents")
+async def get_incidents():
+    """Get recent incidents"""
+    return incidents_db
+
+@app.post("/incidents/autoheal")
+async def auto_heal_incident(pod_name: str, namespace: str):
+    """Trigger auto-healing for a pod"""
+    # Simulate auto-healing
+    incident = Incident(
+        id=len(incidents_db) + 1,
+        title=f"Auto-healing triggered for {pod_name}",
+        description="Pod was automatically restarted due to health check failures",
+        status="resolved",
+        timestamp=datetime.now(),
+        auto_healed=True
+    )
+    incidents_db.append(incident)
+    
+    # Resolve related alerts
+    for alert in alerts_db:
+        if alert.pod_name == pod_name and not alert.resolved:
+            alert.resolved = True
+            alert.resolved_at = datetime.now()
+    
+    return {"status": "auto_healing_triggered", "action": "pod_restart"}
+
+@app.get("/dashboard/stats")
+async def get_dashboard_stats():
+    """Get dashboard statistics"""
+    total_alerts = len(alerts_db)
+    active_alerts = len([a for a in alerts_db if not a.resolved])
+    cost_savings = sum([r.monthly_savings for r in cost_optimizations_db])
+    
+    return {
+        "total_alerts": total_alerts,
+        "active_alerts": active_alerts,
+        "cost_savings": cost_savings,
+        "total_deployments": len(deployments_db),
+        "successful_deployments": len([d for d in deployments_db if d.status == "success"]),
+        "ml_models_count": len(ml_models_db),
+        "auto_healed_incidents": len([i for i in incidents_db if i.auto_healed])
+    }
+
+# Background task for continuous monitoring
+@app.on_event("startup")
+async def startup_event():
+    """Start background monitoring tasks"""
+    asyncio.create_task(monitoring_loop())
+
+async def monitoring_loop():
+    """Continuous monitoring loop"""
+    while True:
+        try:
+            # Check for anomalies periodically
+            metrics = monitoring.get_current_metrics()
+            for metric in metrics:
+                if anomaly_detector.detect_anomaly(metric):
+                    # Create predictive alert
+                    alert = Alert(
+                        id=len(alerts_db) + 1,
+                        severity="warning",
+                        message=f"Predictive alert: {metric['pod_name']} showing abnormal patterns",
+                        type="predictive",
+                        timestamp=datetime.now(),
+                        resolved=False,
+                        pod_name=metric['pod_name'],
+                        namespace=metric['namespace']
+                    )
+                    alerts_db.append(alert)
+        except Exception as e:
+            logging.error(f"Monitoring error: {e}")
+        
+        await asyncio.sleep(60)  # Check every minute
